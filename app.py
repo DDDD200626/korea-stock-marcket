@@ -42,11 +42,13 @@ def run_app() -> None:
         price_cols = ["Close", "ma5", "ma20"]
         available_cols = [c for c in price_cols if c in df_feat.columns]
         if available_cols:
-            st.line_chart(df_feat[available_cols])
+            # pandas / streamlit 버전 차이로 인한 melt/id_vars 오류를 피하기 위해
+            # 인덱스를 초기화한 DataFrame을 사용한다.
+            st.line_chart(df_feat[available_cols].reset_index(drop=True))
 
         if "rsi14" in df_feat.columns:
             st.subheader("RSI(14)")
-            st.line_chart(df_feat[["rsi14"]])
+            st.line_chart(df_feat[["rsi14"]].reset_index(drop=True))
 
     else:
         st.info("왼쪽 사이드바에서 티커와 기간을 선택한 뒤 **예측하기** 버튼을 눌러주세요.")
