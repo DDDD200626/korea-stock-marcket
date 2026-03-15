@@ -42,13 +42,23 @@ def run_app() -> None:
         price_cols = ["Close", "ma5", "ma20"]
         available_cols = [c for c in price_cols if c in df_feat.columns]
         if available_cols:
-            # pandas / streamlit 버전 차이로 인한 melt/id_vars 오류를 피하기 위해
-            # 인덱스를 초기화한 DataFrame을 사용한다.
-            st.line_chart(df_feat[available_cols].reset_index(drop=True))
+            data_price = df_feat[available_cols].reset_index(drop=True)
+            try:
+                st.line_chart(data_price)
+            except Exception:
+                # 클라우드 환경(pandas/streamlit 버전 차이)에서 차트 그리기가 실패하면
+                # 앱이 죽지 않도록 표 형태로만 표시한다.
+                st.info("차트를 그리는 중 오류가 발생하여 표 형태로 대신 표시합니다.")
+                st.dataframe(data_price)
 
         if "rsi14" in df_feat.columns:
             st.subheader("RSI(14)")
-            st.line_chart(df_feat[["rsi14"]].reset_index(drop=True))
+            data_rsi = df_feat[["rsi14"]].reset_index(drop=True)
+            try:
+                st.line_chart(data_rsi)
+            except Exception:
+                st.info("RSI 차트를 그리는 중 오류가 발생하여 표 형태로 대신 표시합니다.")
+                st.dataframe(data_rsi)
 
     else:
         st.info("왼쪽 사이드바에서 티커와 기간을 선택한 뒤 **예측하기** 버튼을 눌러주세요.")
