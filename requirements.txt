@@ -5,3 +5,4 @@ scikit-learn
 requests
 streamlit
 altair<5
+imghdr
