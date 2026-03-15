@@ -12,7 +12,7 @@ def train_model(df: pd.DataFrame) -> Tuple[RandomForestClassifier, List[str]]:
     피처가 포함된 DataFrame을 받아 랜덤포레스트 분류 모델을 학습한다.
     시간 순서를 유지하기 위해 shuffle=False로 train/test를 분리한다.
     """
-    feature_cols: List[str] = [
+    base_feature_cols: List[str] = [
         "return",
         "ma5",
         "ma20",
@@ -26,6 +26,9 @@ def train_model(df: pd.DataFrame) -> Tuple[RandomForestClassifier, List[str]]:
         "bb_lower",
         "bb_width",
     ]
+
+    # 실제 존재하는 컬럼만 사용 (볼린저 밴드 계산이 실패한 경우를 대비)
+    feature_cols: List[str] = [c for c in base_feature_cols if c in df.columns]
 
     X = df[feature_cols]
     y = df["target"]
