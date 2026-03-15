@@ -49,20 +49,13 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat["macd_hist"] = macd - macd_signal
 
     # 볼린저 밴드 (20일, 2표준편차)
-    ma20 = df_feat["ma20"]
-    std20 = close.rolling(window=20).std()
+    ma20 = df_feat["ma20"].astype("float64")
+    std20 = close.rolling(window=20).std().astype("float64")
 
-    # pandas 3.x 호환: 인덱스를 명시적으로 정렬/정렬해 Series 로 강제
-    bb_upper = (ma20 + 2 * std20).astype("float64")
-    bb_lower = (ma20 - 2 * std20).astype("float64")
-
-    # 길이나 인덱스가 맞지 않아도 안전하게 할당되도록 reindex
-    bb_upper = bb_upper.reindex(df_feat.index)
-    bb_lower = bb_lower.reindex(df_feat.index)
-
-    df_feat["bb_upper"] = bb_upper
-    df_feat["bb_lower"] = bb_lower
-    df_feat["bb_width"] = (df_feat["bb_upper"] - df_feat["bb_lower"]) / (ma20.astype("float64") + 1e-9)
+    # pandas 3.x에서도 안전하게 동작하도록 넘파이 배열로 직접 할당
+    df_feat["bb_upper"] = (ma20 + 2 * std20).to_numpy()
+    df_feat["bb_lower"] = (ma20 - 2 * std20).to_numpy()
+    df_feat["bb_width"] = (df_feat["bb_upper"] - df_feat["bb_lower"]) / (ma20.to_numpy() + 1e-9)
 
     # 타깃: 다음 날 종가가 오늘보다 크면 1
     df_feat["target"] = (close.shift(-1) > close).astype(int)
