@@ -4,3 +4,4 @@ numpy
 scikit-learn
 requests
 streamlit
+altair<5
