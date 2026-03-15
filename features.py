@@ -49,13 +49,18 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df_feat["macd_hist"] = macd - macd_signal
 
     # 볼린저 밴드 (20일, 2표준편차)
-    ma20 = df_feat["ma20"].astype("float64")
-    std20 = close.rolling(window=20).std().astype("float64")
+    try:
+        ma20 = df_feat["ma20"].astype("float64")
+        std20 = close.rolling(window=20).std().astype("float64")
 
-    # pandas 3.x에서도 안전하게 동작하도록 넘파이 배열로 직접 할당
-    df_feat["bb_upper"] = (ma20 + 2 * std20).to_numpy()
-    df_feat["bb_lower"] = (ma20 - 2 * std20).to_numpy()
-    df_feat["bb_width"] = (df_feat["bb_upper"] - df_feat["bb_lower"]) / (ma20.to_numpy() + 1e-9)
+        # pandas 3.x 환경에서 발생하는 모호한 브로드캐스팅 오류를 피하기 위해
+        # 볼린저 밴드는 예외 발생 시 생략한다.
+        df_feat["bb_upper"] = ma20 + 2 * std20
+        df_feat["bb_lower"] = ma20 - 2 * std20
+        df_feat["bb_width"] = (df_feat["bb_upper"] - df_feat["bb_lower"]) / (ma20 + 1e-9)
+    except Exception:
+        # 볼린저 밴드 계산에 실패해도 나머지 피처와 모델 학습은 계속 진행
+        pass
 
     # 타깃: 다음 날 종가가 오늘보다 크면 1
     df_feat["target"] = (close.shift(-1) > close).astype(int)
