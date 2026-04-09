@@ -148,6 +148,39 @@ HYPERPARAM_CANDIDATES_XL: list[dict[str, Any]] = [
         "epochs": 740,
     },
 ]
+# 초대형·CPU 경량: 동일 5층 구조, 폭·앙상블·MC·에폭 축소. TEAM_TORCH_MODEL_SIZE=xlarge_lite
+HYPERPARAM_CANDIDATES_XL_LITE: list[dict[str, Any]] = [
+    {
+        "hidden1": 384,
+        "hidden2": 192,
+        "hidden3": 96,
+        "hidden4": 48,
+        "dropout": 0.14,
+        "lr": 0.0028,
+        "weight_decay": 1e-4,
+        "epochs": 520,
+    },
+    {
+        "hidden1": 320,
+        "hidden2": 160,
+        "hidden3": 80,
+        "hidden4": 40,
+        "dropout": 0.13,
+        "lr": 0.003,
+        "weight_decay": 1e-4,
+        "epochs": 500,
+    },
+    {
+        "hidden1": 448,
+        "hidden2": 224,
+        "hidden3": 112,
+        "hidden4": 56,
+        "dropout": 0.15,
+        "lr": 0.0026,
+        "weight_decay": 1.05e-4,
+        "epochs": 540,
+    },
+]
 # 극대형: 5층 MLP 폭·에폭 상한 — GPU·고사양 권장. TEAM_TORCH_MODEL_SIZE=xxl
 HYPERPARAM_CANDIDATES_XXL: list[dict[str, Any]] = [
     {
@@ -316,6 +349,8 @@ def _model_size_profile() -> str:
     raw = (os.environ.get("TEAM_TORCH_MODEL_SIZE") or "standard").strip().lower()
     if raw in ("xxl", "2xl", "giant", "max", "ultra"):
         return "xxl"
+    if raw in ("xlarge_lite", "xlarge-lite", "xlarge_fast", "xlarge-cpu", "xlarge_cpu", "xlcpu"):
+        return "xlarge_lite"
     if raw == "xlarge":
         return "xlarge"
     if raw in ("large", "xl", "huge", "big"):
@@ -352,7 +387,7 @@ def _maybe_extend_hparam_grid(grid: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def _training_profile() -> dict[str, Any]:
-    """standard | large | xlarge | xxl — 학습·추론 하이퍼파라미터 묶음."""
+    """standard | large | xlarge | xlarge_lite | xxl — 학습·추론 하이퍼파라미터 묶음."""
     prof = _model_size_profile()
     if prof == "xxl":
         return {
@@ -361,6 +396,15 @@ def _training_profile() -> dict[str, Any]:
             "cv_folds": min(5, max(3, int(os.environ.get("TEAM_TORCH_CV_FOLDS", "5") or 5))),
             "mc_dropout": int(os.environ.get("TEAM_TORCH_MC_SAMPLES", "32") or 32),
             "hparam_grid": _maybe_extend_hparam_grid(HYPERPARAM_CANDIDATES_XXL),
+            "arch_grid": ARCH_CANDIDATES_LARGE,
+        }
+    if prof == "xlarge_lite":
+        return {
+            "name": "xlarge_lite",
+            "ensemble_size": int(os.environ.get("TEAM_TORCH_ENSEMBLE", "6") or 6),
+            "cv_folds": min(4, max(2, int(os.environ.get("TEAM_TORCH_CV_FOLDS", "4") or 4))),
+            "mc_dropout": int(os.environ.get("TEAM_TORCH_MC_SAMPLES", "14") or 14),
+            "hparam_grid": _maybe_extend_hparam_grid(HYPERPARAM_CANDIDATES_XL_LITE),
             "arch_grid": ARCH_CANDIDATES_LARGE,
         }
     if prof == "xlarge":

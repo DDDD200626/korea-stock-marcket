@@ -4,7 +4,7 @@ import pytest
 
 from edu_tools.dl_roadmap import build_dl_quality_unified
 from edu_tools.team_lm_embedding import LM_EXTRA_DIM, embed8_self_report
-from edu_tools.team_torch_model import _promotion_gate_decision
+from edu_tools.team_torch_model import _model_size_profile, _promotion_gate_decision, _training_profile
 
 
 def test_promotion_gate_accepts_when_candidate_is_not_worse() -> None:
@@ -28,6 +28,15 @@ def test_semantic_encoder_off_returns_zeros(monkeypatch: pytest.MonkeyPatch) -> 
     v = embed8_self_report("한글 자기서술 텍스트입니다.")
     assert len(v) == LM_EXTRA_DIM
     assert all(x == 0.0 for x in v)
+
+
+def test_xlarge_lite_profile_is_lighter_five_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEAM_TORCH_MODEL_SIZE", "xlarge_lite")
+    assert _model_size_profile() == "xlarge_lite"
+    tp = _training_profile()
+    assert tp["name"] == "xlarge_lite"
+    assert int(tp["ensemble_size"]) <= 8
+    assert int(tp["mc_dropout"]) <= 18
 
 
 def test_dl_quality_unified_v4_includes_explainability() -> None:
