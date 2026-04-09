@@ -426,6 +426,45 @@ def count_dataset_lines() -> int:
     return n
 
 
+def _dedupe_training_rows(rows: list[dict]) -> tuple[list[dict], int]:
+    """지문 기준 중복 제거(먼저 나온 행 유지)."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for r in rows:
+        fp = _append_fingerprint(r)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        out.append(r)
+    return out, len(rows) - len(out)
+
+
+def _reservoir_subsample_list(rows: list[dict], max_rows: int, seed: int) -> list[dict]:
+    """메모리에 있는 행 목록에 reservoir 서브샘플."""
+    import random
+
+    rng = random.Random(seed)
+    reservoir: list[dict] = []
+    n_seen = 0
+    for x in rows:
+        n_seen += 1
+        if len(reservoir) < max_rows:
+            reservoir.append(x)
+        else:
+            j = rng.randint(1, n_seen)
+            if j <= max_rows:
+                reservoir[j - 1] = x
+    return reservoir
+
+
+_LAST_RESOLVE_META: dict[str, Any] = {}
+
+
+def last_training_resolve_meta() -> dict[str, Any]:
+    """직전 resolve_training_rows()의 풀·외부 데이터 요약(메타 기록용)."""
+    return dict(_LAST_RESOLVE_META)
+
+
 def load_dataset_reservoir(max_rows: int, seed: int = 42) -> list[dict]:
     """전체를 메모리에 올리지 않고 reservoir 샘플링으로 학습용 서브셋만 구축."""
     import random
@@ -463,14 +502,55 @@ def resolve_training_rows(
     reservoir_max: int,
     reservoir_seed: int,
 ) -> tuple[list[dict], int, int]:
-    """(학습용 행, 풀 크기=JSONL 줄 수, 학습에 쓴 행 수). reservoir_max<=0 이면 전체 로드."""
-    n_pool = count_dataset_lines()
-    if reservoir_max > 0 and n_pool > reservoir_max:
+    """(학습용 행, 풀 크기 추정치, 학습에 쓴 행 수). reservoir_max<=0 이면 로컬 전체 로드.
+
+    TEAM_EXTERNAL_TRAIN_ENABLED=1 이면 URL/파일에서 JSONL을 추가로 합친 뒤(중복 제거) 학습한다.
+    """
+    global _LAST_RESOLVE_META
+    from edu_tools.team_external_train import load_external_training_rows
+
+    ext_rows, ext_meta = load_external_training_rows()
+    n_local = count_dataset_lines()
+
+    if reservoir_max > 0 and n_local > reservoir_max:
         data = load_dataset_reservoir(reservoir_max, reservoir_seed)
-        return data, n_pool, len(data)
-    data = load_dataset()
-    n = len(data)
-    return data, n_pool, n
+    else:
+        data = load_dataset()
+
+    ext_info: dict[str, Any] = {
+        "enabled": bool(ext_meta.get("enabled")),
+        "merged": False,
+    }
+    for k in ("source", "rows_loaded", "parse_skipped_lines", "error", "cache_hit", "url_host", "path", "cache_fetched_at"):
+        if k in ext_meta:
+            ext_info[k] = ext_meta[k]
+
+    if ext_rows:
+        local_len = len(data)
+        combined = data + ext_rows
+        data, dedup_drop = _dedupe_training_rows(combined)
+        ext_info["merged"] = True
+        ext_info["local_rows_before_merge"] = local_len
+        ext_info["external_rows_attempted"] = len(ext_rows)
+        ext_info["dedupe_dropped"] = dedup_drop
+        ext_info["rows_after_merge"] = len(data)
+        if reservoir_max > 0 and len(data) > reservoir_max:
+            data = _reservoir_subsample_list(data, reservoir_max, reservoir_seed + 97_831)
+            ext_info["reservoir_after_merge"] = True
+    else:
+        ext_info["merged"] = bool(ext_meta.get("enabled")) and not ext_meta.get("error")
+
+    n_ext_pool = int(ext_meta.get("rows_loaded") or 0) if ext_info["enabled"] else 0
+    if ext_meta.get("error"):
+        n_ext_pool = 0
+    n_pool = n_local + n_ext_pool
+    n_used = len(data)
+    _LAST_RESOLVE_META = {
+        "n_pool_local_lines": n_local,
+        "n_pool_reported": n_pool,
+        "external_train": ext_info,
+    }
+    return data, n_pool, n_used
 
 
 def _row_created_ts(row: dict) -> float:

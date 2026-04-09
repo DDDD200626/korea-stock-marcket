@@ -24,6 +24,7 @@ from edu_tools.team_ml_model import (
     build_feature_vector,
     dataset_file_sha256,
     filter_training_rows_outliers,
+    last_training_resolve_meta,
     pad_feature_vector,
     retrain_forced_by_env,
     resolve_training_rows,
@@ -1180,6 +1181,7 @@ def train_torch_if_needed() -> dict[str, Any]:
         "input_noise_std_training": round(float(input_noise_std), 6),
         "permutation_importance_top": perm_top,
         "semantic_encoder": semantic_encoder_meta(),
+        "training_pool_resolve": last_training_resolve_meta(),
         "ensemble_stacking": {
             "weights": [round(float(w), 6) for w in ensemble_member_weights],
             "strategy": "inverse_validation_mae",
