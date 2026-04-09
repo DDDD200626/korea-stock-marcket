@@ -17,7 +17,7 @@ PHASES_KO: tuple[str, ...] = (
     "5) 시간 홀드아웃 — TEAM_HOLDOUT_TIME_FRAC 로 최근 구간을 학습에서 제외·holdout_time_mae/pearson/r2 기록",
     "6) 세션 CV·앙상블 — 동일 sess 누수 방지·PyTorch MLP 앙상블·MC 드롭아웃·GBDT 블렌드",
     "7) 하이퍼 탐색 확대 — TEAM_TORCH_EXTENDED_HP=1 시 그리드 변형 후보 추가(시간↑)",
-    "8) 용량 프로파일 — standard / large / xlarge(5층)·TEAM_TORCH_ENSEMBLE 등",
+    "8) 용량 프로파일 — standard / large / xlarge / xxl(5층 극대)·TEAM_TORCH_ENSEMBLE 등",
     "9) 품질 메타 — dl_quality_unified: CV·tail·캘리브·시간 홀드아웃·데이터 파이프라인",
     "10) API·감사 — GET /api/capabilities·dataset-label-summary·dataset SHA-256·GET /api/team/report",
 )

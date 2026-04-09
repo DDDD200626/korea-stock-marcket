@@ -37,53 +37,53 @@ TORCH_MODEL_PATH = DATA_DIR / "team_torch_model.pt"
 TORCH_META_PATH = DATA_DIR / "team_torch_model.meta.json"
 
 # 기본: 경량. TEAM_TORCH_MODEL_SIZE=large → 깊은 대형 MLP + 앙상블 확대 (로컬/CPU 탑재용)
-STANDARD_ENSEMBLE_SIZE = 3
+STANDARD_ENSEMBLE_SIZE = 4
 STANDARD_CV_FOLDS = 5
-STANDARD_MC_DROPOUT = 12
+STANDARD_MC_DROPOUT = 14
 HYPERPARAM_CANDIDATES_STANDARD: list[dict[str, Any]] = [
-    {"hidden1": 32, "hidden2": 16, "hidden3": 0, "dropout": 0.08, "lr": 0.008, "weight_decay": 1e-4, "epochs": 320},
-    {"hidden1": 64, "hidden2": 24, "hidden3": 0, "dropout": 0.12, "lr": 0.006, "weight_decay": 5e-5, "epochs": 420},
-    {"hidden1": 48, "hidden2": 24, "hidden3": 0, "dropout": 0.10, "lr": 0.005, "weight_decay": 1e-4, "epochs": 380},
+    {"hidden1": 40, "hidden2": 20, "hidden3": 0, "dropout": 0.08, "lr": 0.008, "weight_decay": 1e-4, "epochs": 340},
+    {"hidden1": 72, "hidden2": 28, "hidden3": 0, "dropout": 0.12, "lr": 0.006, "weight_decay": 5e-5, "epochs": 440},
+    {"hidden1": 56, "hidden2": 28, "hidden3": 0, "dropout": 0.10, "lr": 0.005, "weight_decay": 1e-4, "epochs": 400},
     # 소표본·노이즈에 강한 쪽 (CV에서 자주 선택되도록 추가 후보)
-    {"hidden1": 56, "hidden2": 22, "hidden3": 0, "dropout": 0.15, "lr": 0.0045, "weight_decay": 2e-4, "epochs": 440},
+    {"hidden1": 64, "hidden2": 26, "hidden3": 0, "dropout": 0.15, "lr": 0.0045, "weight_decay": 2e-4, "epochs": 460},
 ]
 # 대형: 4층 MLP (~수만~십만 단위 파라미터, 입력 차원에 비례)
 HYPERPARAM_CANDIDATES_LARGE: list[dict[str, Any]] = [
     {
-        "hidden1": 256,
-        "hidden2": 128,
-        "hidden3": 64,
-        "dropout": 0.14,
-        "lr": 0.004,
-        "weight_decay": 1e-4,
-        "epochs": 520,
-    },
-    {
-        "hidden1": 192,
-        "hidden2": 96,
-        "hidden3": 48,
-        "dropout": 0.12,
-        "lr": 0.0035,
-        "weight_decay": 8e-5,
-        "epochs": 480,
-    },
-    {
         "hidden1": 320,
         "hidden2": 160,
         "hidden3": 80,
-        "dropout": 0.15,
-        "lr": 0.003,
-        "weight_decay": 1.2e-4,
-        "epochs": 560,
-    },
-    {
-        "hidden1": 224,
-        "hidden2": 112,
-        "hidden3": 56,
-        "dropout": 0.16,
-        "lr": 0.0028,
+        "dropout": 0.14,
+        "lr": 0.0038,
         "weight_decay": 1e-4,
         "epochs": 540,
+    },
+    {
+        "hidden1": 256,
+        "hidden2": 128,
+        "hidden3": 64,
+        "dropout": 0.13,
+        "lr": 0.004,
+        "weight_decay": 9e-5,
+        "epochs": 520,
+    },
+    {
+        "hidden1": 384,
+        "hidden2": 192,
+        "hidden3": 96,
+        "dropout": 0.15,
+        "lr": 0.0032,
+        "weight_decay": 1.15e-4,
+        "epochs": 580,
+    },
+    {
+        "hidden1": 288,
+        "hidden2": 144,
+        "hidden3": 72,
+        "dropout": 0.16,
+        "lr": 0.003,
+        "weight_decay": 1e-4,
+        "epochs": 560,
     },
 ]
 ARCH_CANDIDATES: list[dict[str, Any]] = [
@@ -98,14 +98,14 @@ ARCH_CANDIDATES_LARGE: list[dict[str, Any]] = [
 # 초대형: 5층 MLP (hidden4 포함) — CPU에서 느릴 수 있음. TEAM_TORCH_MODEL_SIZE=xlarge
 HYPERPARAM_CANDIDATES_XL: list[dict[str, Any]] = [
     {
-        "hidden1": 512,
-        "hidden2": 256,
-        "hidden3": 128,
-        "hidden4": 64,
-        "dropout": 0.15,
-        "lr": 0.0024,
-        "weight_decay": 1.1e-4,
-        "epochs": 640,
+        "hidden1": 640,
+        "hidden2": 320,
+        "hidden3": 160,
+        "hidden4": 80,
+        "dropout": 0.16,
+        "lr": 0.0022,
+        "weight_decay": 1.12e-4,
+        "epochs": 700,
     },
     {
         "hidden1": 576,
@@ -115,27 +115,80 @@ HYPERPARAM_CANDIDATES_XL: list[dict[str, Any]] = [
         "dropout": 0.16,
         "lr": 0.0022,
         "weight_decay": 1.2e-4,
+        "epochs": 680,
+    },
+    {
+        "hidden1": 512,
+        "hidden2": 256,
+        "hidden3": 128,
+        "hidden4": 64,
+        "dropout": 0.15,
+        "lr": 0.0025,
+        "weight_decay": 1.05e-4,
         "epochs": 660,
     },
     {
-        "hidden1": 448,
-        "hidden2": 224,
-        "hidden3": 112,
-        "hidden4": 56,
-        "dropout": 0.14,
-        "lr": 0.0026,
-        "weight_decay": 1e-4,
-        "epochs": 620,
-    },
-    {
-        "hidden1": 640,
-        "hidden2": 320,
-        "hidden3": 160,
-        "hidden4": 80,
+        "hidden1": 704,
+        "hidden2": 352,
+        "hidden3": 176,
+        "hidden4": 88,
         "dropout": 0.17,
         "lr": 0.002,
-        "weight_decay": 1.3e-4,
-        "epochs": 680,
+        "weight_decay": 1.25e-4,
+        "epochs": 720,
+    },
+    {
+        "hidden1": 768,
+        "hidden2": 384,
+        "hidden3": 192,
+        "hidden4": 96,
+        "dropout": 0.17,
+        "lr": 0.0019,
+        "weight_decay": 1.28e-4,
+        "epochs": 740,
+    },
+]
+# 극대형: 5층 MLP 폭·에폭 상한 — GPU·고사양 권장. TEAM_TORCH_MODEL_SIZE=xxl
+HYPERPARAM_CANDIDATES_XXL: list[dict[str, Any]] = [
+    {
+        "hidden1": 896,
+        "hidden2": 448,
+        "hidden3": 224,
+        "hidden4": 112,
+        "dropout": 0.17,
+        "lr": 0.00175,
+        "weight_decay": 1.18e-4,
+        "epochs": 780,
+    },
+    {
+        "hidden1": 1024,
+        "hidden2": 512,
+        "hidden3": 256,
+        "hidden4": 128,
+        "dropout": 0.18,
+        "lr": 0.00155,
+        "weight_decay": 1.22e-4,
+        "epochs": 820,
+    },
+    {
+        "hidden1": 768,
+        "hidden2": 384,
+        "hidden3": 192,
+        "hidden4": 96,
+        "dropout": 0.16,
+        "lr": 0.0019,
+        "weight_decay": 1.1e-4,
+        "epochs": 760,
+    },
+    {
+        "hidden1": 1152,
+        "hidden2": 576,
+        "hidden3": 288,
+        "hidden4": 144,
+        "dropout": 0.19,
+        "lr": 0.00145,
+        "weight_decay": 1.28e-4,
+        "epochs": 840,
     },
 ]
 
@@ -261,7 +314,9 @@ def _rolling_time_fold_indices(n: int, fold_count: int) -> list[tuple[list[int],
 
 def _model_size_profile() -> str:
     raw = (os.environ.get("TEAM_TORCH_MODEL_SIZE") or "standard").strip().lower()
-    if raw in ("xlarge", "xxl", "giant", "max"):
+    if raw in ("xxl", "2xl", "giant", "max", "ultra"):
+        return "xxl"
+    if raw == "xlarge":
         return "xlarge"
     if raw in ("large", "xl", "huge", "big"):
         return "large"
@@ -297,23 +352,32 @@ def _maybe_extend_hparam_grid(grid: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def _training_profile() -> dict[str, Any]:
-    """standard | large | xlarge — 학습·추론 하이퍼파라미터 묶음."""
+    """standard | large | xlarge | xxl — 학습·추론 하이퍼파라미터 묶음."""
     prof = _model_size_profile()
+    if prof == "xxl":
+        return {
+            "name": "xxl",
+            "ensemble_size": int(os.environ.get("TEAM_TORCH_ENSEMBLE", "11") or 11),
+            "cv_folds": min(5, max(3, int(os.environ.get("TEAM_TORCH_CV_FOLDS", "5") or 5))),
+            "mc_dropout": int(os.environ.get("TEAM_TORCH_MC_SAMPLES", "32") or 32),
+            "hparam_grid": _maybe_extend_hparam_grid(HYPERPARAM_CANDIDATES_XXL),
+            "arch_grid": ARCH_CANDIDATES_LARGE,
+        }
     if prof == "xlarge":
         return {
             "name": "xlarge",
-            "ensemble_size": int(os.environ.get("TEAM_TORCH_ENSEMBLE", "9") or 9),
-            "cv_folds": min(4, max(2, int(os.environ.get("TEAM_TORCH_CV_FOLDS", "4") or 4))),
-            "mc_dropout": int(os.environ.get("TEAM_TORCH_MC_SAMPLES", "24") or 24),
+            "ensemble_size": int(os.environ.get("TEAM_TORCH_ENSEMBLE", "10") or 10),
+            "cv_folds": min(5, max(2, int(os.environ.get("TEAM_TORCH_CV_FOLDS", "5") or 5))),
+            "mc_dropout": int(os.environ.get("TEAM_TORCH_MC_SAMPLES", "28") or 28),
             "hparam_grid": _maybe_extend_hparam_grid(HYPERPARAM_CANDIDATES_XL),
             "arch_grid": ARCH_CANDIDATES_LARGE,
         }
     if prof == "large":
         return {
             "name": "large",
-            "ensemble_size": int(os.environ.get("TEAM_TORCH_ENSEMBLE", "7") or 7),
-            "cv_folds": min(4, max(2, int(os.environ.get("TEAM_TORCH_CV_FOLDS", "4") or 4))),
-            "mc_dropout": int(os.environ.get("TEAM_TORCH_MC_SAMPLES", "18") or 18),
+            "ensemble_size": int(os.environ.get("TEAM_TORCH_ENSEMBLE", "8") or 8),
+            "cv_folds": min(5, max(2, int(os.environ.get("TEAM_TORCH_CV_FOLDS", "5") or 5))),
+            "mc_dropout": int(os.environ.get("TEAM_TORCH_MC_SAMPLES", "20") or 20),
             "hparam_grid": _maybe_extend_hparam_grid(HYPERPARAM_CANDIDATES_LARGE),
             "arch_grid": ARCH_CANDIDATES_LARGE,
         }
