@@ -350,6 +350,51 @@ def _load_meta() -> dict[str, Any] | None:
         return None
 
 
+def _h_use_residual_mlp(h: dict[str, Any]) -> bool:
+    v = h.get("use_residual_mlp")
+    if v is True or v == 1:
+        return True
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _build_residual_tabular_mlp(nn: Any, h: dict[str, Any], in_dim: int) -> Any:
+    """3층 직렬 MLP 대체: 잔차 블록 + LayerNorm(깊이·표현력 상한 확장, 표 형태 입력용)."""
+    act = str(h.get("activation", "relu")).lower()
+    if act == "gelu":
+        act_layer = nn.GELU
+    elif act == "silu":
+        act_layer = nn.SiLU
+    else:
+        act_layer = nn.ReLU
+    h1 = int(h["hidden1"])
+    h2 = int(h["hidden2"])
+    drop = float(h["dropout"])
+
+    class _ResTab(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin1 = nn.Linear(int(in_dim), h1)
+            self.ln = nn.LayerNorm(h1)
+            self.act = act_layer()
+            self.drop = nn.Dropout(p=drop)
+            self.lin2 = nn.Linear(h1, int(in_dim))
+            self.head1 = nn.Linear(int(in_dim), h2)
+            self.act2 = act_layer()
+            self.head2 = nn.Linear(h2, 1)
+
+        def forward(self, x: Any) -> Any:
+            r = self.lin1(x)
+            r = self.ln(r)
+            r = self.act(r)
+            r = self.drop(r)
+            r = self.lin2(r)
+            z = x + r
+            z = self.act2(self.head1(z))
+            return self.head2(z)
+
+    return _ResTab()
+
+
 def _build_model(nn: Any, h: dict[str, Any], in_dim: int) -> Any:
     act = str(h.get("activation", "relu")).lower()
     if act == "gelu":
@@ -361,6 +406,8 @@ def _build_model(nn: Any, h: dict[str, Any], in_dim: int) -> Any:
     h3 = int(h.get("hidden3") or 0)
     h4 = int(h.get("hidden4") or 0)
     drop = float(h["dropout"])
+    if _h_use_residual_mlp(h) and h3 == 0 and h4 == 0:
+        return _build_residual_tabular_mlp(nn, h, in_dim)
     if h3 > 0 and h4 > 0:
         drop2 = min(0.35, drop * 0.88)
         drop3 = min(0.32, drop * 0.76)
@@ -436,6 +483,7 @@ def _fit_gbdt_and_blend_alpha(
     xz_all: Any,
     y_all: Any,
     ensemble_states: list[dict[str, Any]],
+    ensemble_member_weights: list[float] | None,
     best_h: dict[str, Any],
     in_dim: int,
     idx: list[int],
@@ -475,13 +523,19 @@ def _fit_gbdt_and_blend_alpha(
 
         xz_va_t = xz_all[va_idx]
         acc = torch.zeros((xz_va_t.shape[0],), device=xz_all.device, dtype=xz_all.dtype)
-        for sd in ensemble_states:
+        k = len(ensemble_states)
+        w_list = ensemble_member_weights
+        if not w_list or len(w_list) != k:
+            w_list = [1.0 / max(k, 1)] * max(k, 1)
+        sw = sum(w_list) or 1.0
+        w_norm = [float(w) / sw for w in w_list]
+        for wi, sd in enumerate(ensemble_states):
             model = _build_model(nn, best_h, in_dim)
             model.load_state_dict(sd)
             model.eval()
             with torch.inference_mode():
-                acc += model(xz_va_t).squeeze(-1)
-        nn_m = acc / max(len(ensemble_states), 1)
+                acc += w_norm[wi] * model(xz_va_t).squeeze(-1)
+        nn_m = acc
         cal_nn = ((nn_m * calib_a) + calib_b).clamp(0.0, 100.0)
         h_va = torch.as_tensor(hgb.predict(X_va), device=xz_all.device, dtype=xz_all.dtype).clamp(0.0, 100.0)
 
@@ -747,6 +801,12 @@ def train_torch_if_needed() -> dict[str, Any]:
         torch.cuda.manual_seed_all(run_seed)
 
     input_noise_std = _resolve_input_noise_std_training()
+    residual_flag = (os.environ.get("TEAM_TORCH_RESIDUAL_MLP", "0") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
     x_all = torch.tensor(
         [pad_feature_vector([float(v) for v in r["x"]]) for r in data_eff], dtype=torch.float32
@@ -776,11 +836,11 @@ def train_torch_if_needed() -> dict[str, Any]:
     cv_unique_groups = len(set(_row_group_ids(sess_ids)))
 
     # hyperparameter + architecture search with CV MAE
-    best_h = {**tp["hparam_grid"][0], **tp["arch_grid"][0]}
+    best_h = {**tp["hparam_grid"][0], **tp["arch_grid"][0], "use_residual_mlp": residual_flag}
     best_cv_mae = float("inf")
     for h_base in tp["hparam_grid"]:
         for arch in tp["arch_grid"]:
-            h = {**h_base, **arch}
+            h = {**h_base, **arch, "use_residual_mlp": residual_flag}
             fold_maes: list[float] = []
             for tr_idx, va_idx in fold_specs:
                 if not va_idx or not tr_idx:
@@ -943,6 +1003,11 @@ def train_torch_if_needed() -> dict[str, Any]:
         calib_targets.extend([float(v) for v in y_va.view(-1).tolist()])
         ensemble_states.append(model.state_dict())
 
+    eps_w = 1e-3
+    w_raw = [1.0 / (float(v) + eps_w) for v in val_maes]
+    sw = sum(w_raw) or 1.0
+    ensemble_member_weights = [w / sw for w in w_raw]
+
     split_perm = max(1, int(n * 0.86))
     va_idx_perm = idx[split_perm:] if split_perm < n else idx[-1:]
     perm_top = _permutation_importance_top_k(
@@ -999,13 +1064,13 @@ def train_torch_if_needed() -> dict[str, Any]:
         )
         xz_h = (x_h - means) / stds
         acc_p = torch.zeros((nh,), device=x_all.device, dtype=x_all.dtype)
-        for sd in ensemble_states:
+        for wi, sd in enumerate(ensemble_states):
             model = _build_model(nn, best_h, in_dim)
             model.load_state_dict(sd)
             model.eval()
             with torch.inference_mode():
-                acc_p += model(xz_h).squeeze(-1)
-        pred_raw = acc_p / max(len(ensemble_states), 1)
+                acc_p += float(ensemble_member_weights[wi]) * model(xz_h).squeeze(-1)
+        pred_raw = acc_p
         pred_cal = (pred_raw * calib_a + calib_b).clamp(0.0, 100.0)
         y_vec = torch.tensor(
             [max(0.0, min(100.0, float(r["y"]))) for r in data_hold_list],
@@ -1023,6 +1088,7 @@ def train_torch_if_needed() -> dict[str, Any]:
         xz_all=xz_all,
         y_all=y_all,
         ensemble_states=ensemble_states,
+        ensemble_member_weights=ensemble_member_weights,
         best_h=best_h,
         in_dim=in_dim,
         idx=idx,
@@ -1034,6 +1100,8 @@ def train_torch_if_needed() -> dict[str, Any]:
 
     state = {
         "ensemble_state_dicts": ensemble_states,
+        "ensemble_member_weights": ensemble_member_weights,
+        "ensemble_validation_maes": [round(float(v), 4) for v in val_maes],
         "means": means.squeeze(0).tolist(),
         "stds": stds.squeeze(0).tolist(),
         "calibration_a": calib_a,
@@ -1112,6 +1180,10 @@ def train_torch_if_needed() -> dict[str, Any]:
         "input_noise_std_training": round(float(input_noise_std), 6),
         "permutation_importance_top": perm_top,
         "semantic_encoder": semantic_encoder_meta(),
+        "ensemble_stacking": {
+            "weights": [round(float(w), 6) for w in ensemble_member_weights],
+            "strategy": "inverse_validation_mae",
+        },
     }
     out_meta["dl_quality_unified"] = build_dl_quality_unified(out_meta)
     promote_ok, promote_reasons = _promotion_gate_decision(meta, out_meta)
@@ -1187,20 +1259,40 @@ def predict_torch_scores_batched(feature_rows: list[list[float]]) -> list[dict[s
     xz = (x - means) / stds
     h = state.get("best_hparams") or {**HYPERPARAM_CANDIDATES_STANDARD[0], **ARCH_CANDIDATES[0]}
     mc_n = int(state.get("mc_dropout_samples") or STANDARD_MC_DROPOUT)
-    stacks: list[torch.Tensor] = []
+    raw_w = state.get("ensemble_member_weights")
+    n_mem = len(sds)
+    if isinstance(raw_w, list) and len(raw_w) == n_mem:
+        sw = sum(float(w) for w in raw_w) or 1.0
+        w_mem = [float(w) / sw for w in raw_w]
+    else:
+        w_mem = [1.0 / max(n_mem, 1)] * n_mem
+    det_rows: list[torch.Tensor] = []
+    mc_std_rows: list[torch.Tensor] = []
     for sd in sds:
         model = _build_model(nn, h, in_dim)
         model.load_state_dict(sd)
         model.eval()
         with torch.inference_mode():
-            stacks.append(model(xz).squeeze(-1))
+            det = model(xz).squeeze(-1)
+        det_rows.append(det)
         model.train()
+        mc_rows: list[torch.Tensor] = []
         with torch.no_grad():
             for _ in range(mc_n):
-                stacks.append(model(xz).squeeze(-1))
-    mat = torch.stack(stacks, dim=0)
-    mean = mat.mean(dim=0)
-    std = mat.std(dim=0, unbiased=False)
+                mc_rows.append(model(xz).squeeze(-1))
+        if mc_rows:
+            mc_stack = torch.stack(mc_rows, dim=0)
+            mc_std_rows.append(mc_stack.std(dim=0, unbiased=False))
+        else:
+            mc_std_rows.append(torch.zeros_like(det))
+    det_mat = torch.stack(det_rows, dim=0)
+    w_t = torch.tensor(w_mem, device=xz.device, dtype=xz.dtype).view(-1, 1)
+    mean = (det_mat * w_t).sum(dim=0)
+    mean_exp = mean.unsqueeze(0).expand_as(det_mat)
+    std_between = (w_t * (det_mat - mean_exp) ** 2).sum(dim=0).sqrt()
+    mc_mat = torch.stack(mc_std_rows, dim=0)
+    std_mc = (mc_mat * w_t).sum(dim=0)
+    std = (std_mc**2 + std_between**2).sqrt()
     calib_a = float(state.get("calibration_a", 1.0))
     calib_b = float(state.get("calibration_b", 0.0))
     calibrated = (mean * calib_a) + calib_b
