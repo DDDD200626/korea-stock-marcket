@@ -350,6 +350,7 @@ interface TeamUnifiedAnalysis {
   weaknesses: string[];
   position_in_team: string;
   recommended_actions: string[];
+  metric_dl_note?: string;
 }
 
 interface TeamUnifiedReport {
@@ -361,6 +362,8 @@ interface TeamUnifiedReport {
   dl_model_info?: Record<string, unknown>;
   evaluation_log: Record<string, unknown>;
   disclaimer: string;
+  team_narrative?: string;
+  ai_meta?: Record<string, unknown>;
 }
 
 interface PromotionGateInfo {
@@ -1879,6 +1882,11 @@ function teamReportHtml(): string {
     <section class="report-section report-ai">
       <h4 class="report-h4">AI 분석 (설명)</h4>
       <p class="prose">${escapeHtml(an?.summary || "")}</p>
+      ${
+        an?.metric_dl_note?.trim()
+          ? `<p class="muted small"><strong>규칙·DL 정합</strong> ${escapeHtml(an.metric_dl_note)}</p>`
+          : ""
+      }
       <p class="muted small">${escapeHtml(an?.position_in_team || "")}</p>
       <div class="grid-2 report-strength-weak">
         <div><strong>강점</strong><ul>${strengths}</ul></div>
@@ -1909,6 +1917,15 @@ function teamReportHtml(): string {
         : ""
     }
     ${meta ? `<p class="result-meta muted small no-print">${meta}</p>` : ""}
+    ${
+      rep.team_narrative?.trim()
+        ? `<div class="hud-panel report-team-narrative"><h3 class="subh">팀 총평 (LLM)</h3><p class="prose">${escapeHtml(rep.team_narrative)}</p>${
+            rep.ai_meta && typeof rep.ai_meta === "object" && rep.ai_meta.mode
+              ? `<p class="muted small">엔진: ${escapeHtml(String(rep.ai_meta.mode))}</p>`
+              : ""
+          }</div>`
+        : ""
+    }
     ${promotionGateBannerHtml(rep)}
     ${dlExplainOpsPanelHtml(rep)}
     ${confidenceGateHtml(rep)}

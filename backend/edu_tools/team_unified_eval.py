@@ -9,7 +9,9 @@ import json
 import math
 import os
 import re
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,7 +44,7 @@ from edu_tools.team_torch_model import (
     torch_model_meta,
     train_torch_if_needed,
 )
-from learning_analysis.llm_clients import get_openai_client
+from learning_analysis.llm_clients import ensure_gemini_configured, get_openai_client
 
 router = APIRouter()
 
@@ -132,6 +134,11 @@ class AnalysisResult(BaseModel):
     weaknesses: list[str] = Field(default_factory=list)
     position_in_team: str = ""
     recommended_actions: list[str] = Field(default_factory=list)
+    metric_dl_note: str = Field(
+        default="",
+        max_length=1200,
+        description="규칙 점수·DL 보조(blended)와의 정합/차이를 한국어로 짧게",
+    )
 
 
 class TeamReportResponse(BaseModel):
@@ -142,6 +149,15 @@ class TeamReportResponse(BaseModel):
     trust_scores: dict[str, float] = Field(default_factory=dict)
     dl_model_info: dict[str, Any] = Field(default_factory=dict)
     evaluation_log: dict[str, Any] = Field(default_factory=dict)
+    team_narrative: str = Field(
+        default="",
+        max_length=4000,
+        description="LLM이 생성한 팀 단위 총평(교육자용, API 키 없으면 비움)",
+    )
+    ai_meta: dict[str, Any] = Field(
+        default_factory=dict,
+        description="리포트 LLM 호출 메타(provider, 모델, 지연 등)",
+    )
     disclaimer: str = Field(
         default="정량 점수는 결정론적으로 계산되며, AI는 설명만 생성합니다."
     )
@@ -847,59 +863,323 @@ def _fallback_analysis(
     return out
 
 
-def run_ai_analyzer(
-    users: list[TeamUserIn], scores: list[ScoreResult], anomalies: list[AnomalyResult]
-) -> list[AnalysisResult]:
-    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    if not key:
-        return _fallback_analysis(users, scores, anomalies)
-    payload = {
+_REPORT_LLM_SYSTEM_KO = """당신은 대학 팀 프로젝트 평가를 돕는 시니어 TA(한국어)입니다.
+입력 JSON에는 규칙 엔진 점수(normalizedScore), 데이터로 학습한 보조 점수(dl_score), 블렌드(blendedScore),
+DL 신뢰도(dl_confidence), 이상 플래그, 자기서술 발췌, 그리고 모델 품질 요약이 포함됩니다.
+
+규칙:
+- 숫자 점수는 절대 재산정·수정하지 말고 해석·근거만 제시합니다.
+- dl_score가 있으면 normalizedScore와의 차이를 metric_dl_note에 반드시 언급합니다(왜 어긋날 수 있는지 교육적으로).
+- dl_confidence가 낮거나 이상 플래그가 있으면 보수적으로 서술합니다.
+- 출력은 JSON 한 덩어리만 (마크다운·코드펜스 금지).
+
+스키마:
+{
+  "team_summary": "팀 전체 2~5문장 총평(교육자용)",
+  "members": [
+    {
+      "member_name": "이름과 입력 동일",
+      "summary": "2~4문장",
+      "strengths": ["짧은 근거 2~4개"],
+      "weaknesses": ["짧은 근거 1~3개"],
+      "position_in_team": "역할·상대적 위치",
+      "recommended_actions": ["실행 가능한 제안 2~4개"],
+      "metric_dl_note": "규칙 vs DL(blended) 정합·긴장 요약 1~2문장"
+    }
+  ]
+}
+members 순서와 인원 수는 입력과 동일해야 합니다."""
+
+
+def _report_llm_dl_context(dl_model_info: dict[str, Any]) -> dict[str, Any]:
+    q = dl_model_info.get("quality") if isinstance(dl_model_info, dict) else None
+    q = q if isinstance(q, dict) else {}
+    op = q.get("operations_playbook") if isinstance(q.get("operations_playbook"), dict) else {}
+    return {
+        "dl_backend": dl_model_info.get("backend"),
+        "blend_formula": dl_model_info.get("blend_formula"),
+        "sample_count": dl_model_info.get("sample_count"),
+        "model_size_profile": q.get("model_size_profile"),
+        "validation_mae_mean": q.get("validation_mae_mean"),
+        "holdout_time_mae": q.get("holdout_time_mae"),
+        "feature_drift": q.get("feature_drift"),
+        "operations_summary": (op.get("summary_ko") or "")[:800],
+        "checklist_hints": (op.get("checklist_ko") or [])[:6],
+    }
+
+
+def _build_report_llm_payload(
+    *,
+    project_name: str,
+    users: list[TeamUserIn],
+    scores: list[ScoreResult],
+    anomalies: list[AnomalyResult],
+    dl_model_info: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "project_name": project_name,
+        "dl_context": _report_llm_dl_context(dl_model_info),
         "members": [
             {
                 "member_name": s.member_name,
                 "score": s.model_dump(),
                 "anomaly_flags": next((a.flags for a in anomalies if a.member_name == s.member_name), []),
-                "self_report_excerpt": next((u.selfReport for u in users if u.name.strip() == s.member_name), "")[:600],
+                "self_report_excerpt": next((u.selfReport for u in users if u.name.strip() == s.member_name), "")[:900],
             }
             for s in scores
-        ]
+        ],
     }
-    sys = (
-        "점수는 절대 바꾸지 말고 설명만 하세요. JSON 객체로만 출력: "
-        '{"members":[{"member_name":"","summary":"","strengths":[],"weaknesses":[],"position_in_team":"","recommended_actions":[]}]}'
-    )
-    try:
-        client = get_openai_client(key)
-        res = client.chat.completions.create(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-        )
-        data = _extract_json(res.choices[0].message.content or "{}")
-        arr = data.get("members") if isinstance(data, dict) else None
-        if not isinstance(arr, list):
-            return _fallback_analysis(users, scores, anomalies)
-        out: list[AnalysisResult] = []
-        for it in arr:
-            if not isinstance(it, dict):
-                continue
-            out.append(
-                AnalysisResult(
-                    member_name=str(it.get("member_name", ""))[:120],
-                    summary=str(it.get("summary", ""))[:1500],
-                    strengths=[str(x) for x in (it.get("strengths") or [])][:5],
-                    weaknesses=[str(x) for x in (it.get("weaknesses") or [])][:5],
-                    position_in_team=str(it.get("position_in_team", ""))[:400],
-                    recommended_actions=[str(x) for x in (it.get("recommended_actions") or [])][:5],
-                )
+
+
+def _analysis_from_llm_rows(
+    data: dict[str, Any], scores: list[ScoreResult]
+) -> tuple[list[AnalysisResult], str] | None:
+    if not isinstance(data, dict):
+        return None
+    arr = data.get("members")
+    if not isinstance(arr, list):
+        return None
+    team_summary = str(data.get("team_summary", "") or "")[:4000]
+    out: list[AnalysisResult] = []
+    for it in arr:
+        if not isinstance(it, dict):
+            continue
+        out.append(
+            AnalysisResult(
+                member_name=str(it.get("member_name", ""))[:120],
+                summary=str(it.get("summary", ""))[:1500],
+                strengths=[str(x) for x in (it.get("strengths") or [])][:5],
+                weaknesses=[str(x) for x in (it.get("weaknesses") or [])][:5],
+                position_in_team=str(it.get("position_in_team", ""))[:400],
+                recommended_actions=[str(x) for x in (it.get("recommended_actions") or [])][:5],
+                metric_dl_note=str(it.get("metric_dl_note", "") or "")[:1200],
             )
-        return out if len(out) == len(scores) else _fallback_analysis(users, scores, anomalies)
-    except Exception:
-        return _fallback_analysis(users, scores, anomalies)
+        )
+    if len(out) != len(scores):
+        return None
+    return out, team_summary
+
+
+def _merge_two_team_summaries(a: str, b: str) -> str:
+    a, b = a.strip(), b.strip()
+    if a and b:
+        return f"[Gemini 관점]\n{a}\n\n[OpenAI 관점]\n{b}"[:4000]
+    return (a or b)[:4000]
+
+
+def _merge_analysis_lists(
+    left: list[AnalysisResult], right: list[AnalysisResult], scores: list[ScoreResult]
+) -> list[AnalysisResult]:
+    rmap = {x.member_name.strip(): x for x in right}
+    merged: list[AnalysisResult] = []
+    for L in left:
+        name = L.member_name.strip()
+        R = rmap.get(name)
+        if R is None:
+            merged.append(L)
+            continue
+
+        def _uniq(xs: list[str], ys: list[str], cap: int) -> list[str]:
+            seen: set[str] = set()
+            out: list[str] = []
+            for z in xs + ys:
+                t = z.strip()
+                if not t or t.lower() in seen:
+                    continue
+                seen.add(t.lower())
+                out.append(t[:500])
+                if len(out) >= cap:
+                    break
+            return out
+
+        merged.append(
+            AnalysisResult(
+                member_name=name,
+                summary=f"[Gemini]\n{L.summary}\n\n[OpenAI]\n{R.summary}"[:1500],
+                strengths=_uniq(L.strengths, R.strengths, 5),
+                weaknesses=_uniq(L.weaknesses, R.weaknesses, 5),
+                position_in_team=L.position_in_team or R.position_in_team,
+                recommended_actions=_uniq(L.recommended_actions, R.recommended_actions, 5),
+                metric_dl_note=f"{L.metric_dl_note}\n{R.metric_dl_note}".strip()[:1200],
+            )
+        )
+    return merged if len(merged) == len(scores) else left
+
+
+def _openai_report_raw(payload: dict[str, Any], api_key: str) -> dict[str, Any] | None:
+    model = (os.environ.get("TEAM_REPORT_OPENAI_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o").strip()
+    client = get_openai_client(api_key)
+    res = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": _REPORT_LLM_SYSTEM_KO},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.2,
+        max_tokens=4096,
+    )
+    text = (res.choices[0].message.content or "").strip()
+    return _extract_json(text) if text else None
+
+
+def _gemini_report_raw(payload: dict[str, Any], api_key: str) -> dict[str, Any] | None:
+    import google.generativeai as genai
+
+    model_name = (os.environ.get("TEAM_REPORT_GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    ensure_gemini_configured(api_key)
+    model = genai.GenerativeModel(model_name=model_name, system_instruction=_REPORT_LLM_SYSTEM_KO)
+    res = model.generate_content(
+        json.dumps(payload, ensure_ascii=False),
+        generation_config={
+            "response_mime_type": "application/json",
+            "temperature": 0.2,
+            "max_output_tokens": 4096,
+        },
+    )
+    text = (getattr(res, "text", None) or "").strip()
+    if not text:
+        return None
+    return _extract_json(text)
+
+
+def run_ai_analyzer(
+    users: list[TeamUserIn],
+    scores: list[ScoreResult],
+    anomalies: list[AnomalyResult],
+    *,
+    dl_model_info: dict[str, Any],
+    project_name: str = "",
+) -> tuple[list[AnalysisResult], str, dict[str, Any]]:
+    """Gemini/OpenAI(단일·병렬)로 리포트 분석. API 키 없으면 휴리스틱."""
+    meta: dict[str, Any] = {"providers_attempted": [], "mode": "fallback"}
+    payload = _build_report_llm_payload(
+        project_name=project_name.strip(),
+        users=users,
+        scores=scores,
+        anomalies=anomalies,
+        dl_model_info=dl_model_info if isinstance(dl_model_info, dict) else {},
+    )
+    gk = (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or "").strip()
+    ok_openai = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    mode = (os.environ.get("TEAM_REPORT_LLM") or "auto").strip().lower()
+    if mode in ("0", "off", "none", "heuristic"):
+        fb = _fallback_analysis(users, scores, anomalies)
+        return fb, "", {**meta, "mode": "heuristic_only"}
+
+    def _run_gemini() -> tuple[str, dict[str, Any] | None, float]:
+        t0 = time.perf_counter()
+        try:
+            data = _gemini_report_raw(payload, gk)
+            return "gemini", data, (time.perf_counter() - t0) * 1000
+        except Exception:
+            return "gemini", None, (time.perf_counter() - t0) * 1000
+
+    def _run_openai() -> tuple[str, dict[str, Any] | None, float]:
+        t0 = time.perf_counter()
+        try:
+            data = _openai_report_raw(payload, ok_openai)
+            return "openai", data, (time.perf_counter() - t0) * 1000
+        except Exception:
+            return "openai", None, (time.perf_counter() - t0) * 1000
+
+    results: list[tuple[str, dict[str, Any] | None, float, str | None]] = []
+
+    if mode == "multi" and gk and ok_openai:
+        meta["providers_attempted"] = ["gemini", "openai"]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [pool.submit(_run_gemini), pool.submit(_run_openai)]
+            for fut in as_completed(futs):
+                label, data, ms = fut.result()
+                err = None
+                if data is None:
+                    err = "no_or_invalid_response"
+                results.append((label, data, ms, err))
+        gem_data = next((d for lab, d, _, _ in results if lab == "gemini"), None)
+        oa_data = next((d for lab, d, _, _ in results if lab == "openai"), None)
+        meta["latencies_ms"] = {lab: round(ms, 2) for lab, _, ms, _ in results}
+        meta["models"] = {
+            "gemini": (os.environ.get("TEAM_REPORT_GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"),
+            "openai": (os.environ.get("TEAM_REPORT_OPENAI_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o"),
+        }
+        g_parsed = _analysis_from_llm_rows(gem_data, scores) if isinstance(gem_data, dict) else None
+        o_parsed = _analysis_from_llm_rows(oa_data, scores) if isinstance(oa_data, dict) else None
+        if g_parsed and o_parsed:
+            g_rows, g_sum = g_parsed
+            o_rows, o_sum = o_parsed
+            merged_rows = _merge_analysis_lists(g_rows, o_rows, scores)
+            meta["mode"] = "multi_merged"
+            return merged_rows, _merge_two_team_summaries(g_sum, o_sum), meta
+        if g_parsed:
+            meta["mode"] = "multi_partial_gemini_only"
+            r, s = g_parsed
+            return r, s, meta
+        if o_parsed:
+            meta["mode"] = "multi_partial_openai_only"
+            r, s = o_parsed
+            return r, s, meta
+        fb = _fallback_analysis(users, scores, anomalies)
+        meta["mode"] = "multi_failed_fallback"
+        return fb, "", meta
+
+    if mode == "openai" and ok_openai:
+        meta["providers_attempted"] = ["openai"]
+        lab, data, ms = _run_openai()
+        meta["latencies_ms"] = {lab: round(ms, 2)}
+        meta["models"] = {"openai": (os.environ.get("TEAM_REPORT_OPENAI_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o")}
+        if isinstance(data, dict):
+            parsed = _analysis_from_llm_rows(data, scores)
+            if parsed:
+                meta["mode"] = "openai"
+                r, s = parsed
+                return r, s, meta
+        fb = _fallback_analysis(users, scores, anomalies)
+        meta["mode"] = "openai_failed_fallback"
+        return fb, "", meta
+
+    if mode == "gemini" and gk:
+        meta["providers_attempted"] = ["gemini"]
+        lab, data, ms = _run_gemini()
+        meta["latencies_ms"] = {lab: round(ms, 2)}
+        meta["models"] = {"gemini": (os.environ.get("TEAM_REPORT_GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash")}
+        if isinstance(data, dict):
+            parsed = _analysis_from_llm_rows(data, scores)
+            if parsed:
+                meta["mode"] = "gemini"
+                r, s = parsed
+                return r, s, meta
+        fb = _fallback_analysis(users, scores, anomalies)
+        meta["mode"] = "gemini_failed_fallback"
+        return fb, "", meta
+
+    # auto: Gemini 우선, 실패 시 OpenAI
+    if mode in ("auto", "", "default") or mode not in ("multi", "openai", "gemini"):
+        if gk:
+            meta["providers_attempted"].append("gemini")
+            _, data, ms = _run_gemini()
+            meta["latencies_ms"] = {"gemini": round(ms, 2)}
+            meta["models"] = {"gemini": (os.environ.get("TEAM_REPORT_GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash")}
+            if isinstance(data, dict):
+                parsed = _analysis_from_llm_rows(data, scores)
+                if parsed:
+                    meta["mode"] = "gemini"
+                    r, s = parsed
+                    return r, s, meta
+        if ok_openai:
+            meta["providers_attempted"].append("openai")
+            _, data, ms = _run_openai()
+            meta.setdefault("latencies_ms", {})["openai"] = round(ms, 2)
+            meta.setdefault("models", {})["openai"] = (os.environ.get("TEAM_REPORT_OPENAI_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o")
+            if isinstance(data, dict):
+                parsed = _analysis_from_llm_rows(data, scores)
+                if parsed:
+                    meta["mode"] = "openai"
+                    r, s = parsed
+                    return r, s, meta
+
+    fb = _fallback_analysis(users, scores, anomalies)
+    meta["mode"] = "fallback_no_keys"
+    return fb, "", meta
 
 
 @router.post("/report", response_model=TeamReportResponse)
@@ -909,7 +1189,13 @@ def post_team_report(body: TeamReportRequest) -> TeamReportResponse:
     scores, trust = run_score_engine(users)
     dl_model_info = apply_dl_scores(users, scores, request_id=req_id)
     anomalies = run_anomaly_detector(users, scores)
-    analysis = run_ai_analyzer(users, scores, anomalies)
+    analysis, team_narrative, ai_meta = run_ai_analyzer(
+        users,
+        scores,
+        anomalies,
+        dl_model_info=dl_model_info,
+        project_name=body.project_name.strip(),
+    )
     edge_cases = detect_edge_cases(users, scores)
 
     ts = datetime.now(timezone.utc).isoformat()
@@ -927,6 +1213,8 @@ def post_team_report(body: TeamReportRequest) -> TeamReportResponse:
         "anomaly": [a.model_dump() for a in anomalies],
         "ai_result": [a.model_dump() for a in analysis],
         "edge_cases": edge_cases,
+        "ai_meta": ai_meta,
+        "team_narrative": team_narrative,
     }
     try:
         record_team_report(
@@ -950,6 +1238,8 @@ def post_team_report(body: TeamReportRequest) -> TeamReportResponse:
         trust_scores=trust,
         dl_model_info=dl_model_info,
         evaluation_log=evaluation_log,
+        team_narrative=team_narrative,
+        ai_meta=ai_meta,
     )
 
 

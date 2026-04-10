@@ -314,3 +314,6 @@ def test_team_report_unified_pipeline() -> None:
     op = q.get("operations_playbook") or {}
     assert op.get("recommendation_level") in ("ok", "watch", "action")
     assert isinstance(op.get("checklist_ko"), list)
+    assert "ai_meta" in data and isinstance(data["ai_meta"], dict)
+    assert "team_narrative" in data
+    assert isinstance(data.get("team_narrative"), str)
