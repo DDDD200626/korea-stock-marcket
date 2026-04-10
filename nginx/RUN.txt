@@ -1,0 +1,7 @@
+1) 백엔드: backend 폴더에서 uvicorn learning_analysis.main:app --host 127.0.0.1 --port 8000
+2) 프론트 빌드: frontend 폴더에서 npm run build  (→ ../frontend/dist)
+3) nginx: 저장소 루트에서  powershell -ExecutionPolicy Bypass -File nginx\start-nginx.ps1
+4) 브라우저: http://127.0.0.1:8080
+5) 중지: powershell -File nginx\stop-nginx.ps1
+
+tools/nginx-win 이 없으면 nginx.org Windows zip 을 받아 nginx.exe 경로를 스크립트에 맞추세요.

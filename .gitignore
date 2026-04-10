@@ -19,3 +19,6 @@ backend/edu_tools/data/team_torch_model.meta.json
 backend/edu_tools/data/team_ml_fp_ring.json
 backend/edu_tools/data/team_external_train.cache.jsonl
 backend/edu_tools/data/team_external_train.cache.meta.json
+# 로컬 nginx (Windows 스크립트)
+nginx/logs/
+nginx/temp/
