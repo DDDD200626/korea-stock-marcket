@@ -7,13 +7,23 @@ import { defineConfig } from "vite";
  * - VITE_API_BASE=http://127.0.0.1:8000 으로 두면 브라우저가 백엔드에 직접 호출(CORS 필요)
  */
 const backend = "http://127.0.0.1:8000";
-const toBackend = { target: backend, changeOrigin: true, secure: false, ws: true };
+/** 긴 팀 리포트·분석 요청이 dev 프록시 기본 타임아웃에 걸리지 않도록 */
+const longProxy = {
+  target: backend,
+  changeOrigin: true,
+  secure: false,
+  ws: true,
+  configure: (proxy: { proxyTimeout?: number; timeout?: number }) => {
+    proxy.proxyTimeout = 600_000;
+    proxy.timeout = 600_000;
+  },
+};
 
-const apiProxy: Record<string, { target: string; changeOrigin: boolean }> = {
-  "/api": toBackend,
-  "/docs": toBackend,
-  "/redoc": toBackend,
-  "/openapi.json": toBackend,
+const apiProxy: Record<string, Record<string, unknown>> = {
+  "/api": longProxy,
+  "/docs": longProxy,
+  "/redoc": longProxy,
+  "/openapi.json": longProxy,
 };
 
 export default defineConfig({

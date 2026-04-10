@@ -18,10 +18,19 @@ let lastHealthFetchedAt = 0;
 let lastHealthAttemptAt = 0;
 let lastHealthLatencyMs: number | null = null;
 let lastHealthCheckedAt = 0;
+/** 마지막으로 health OK였던 시각 — 일시 실패 시 UI를 바로 OFFLINE로 두지 않음 */
+let lastSuccessfulHealthAt = 0;
+/** health 요청은 실패했지만 2분 이내 성공 이력이 있어 마지막 스냅샷 유지 */
+let connectionUnstable = false;
 const HEALTH_CACHE_MS = 5000;
-const HEALTH_RETRY_MS = 4000;
-/** 백엔드 미연결 시 주기적으로 /api/health 재시도 */
+const HEALTH_RETRY_MS = 2500;
+const HEALTH_STICKY_MS = 120_000;
+const HEALTH_FETCH_ATTEMPTS = 6;
+const HEALTH_ATTEMPT_TIMEOUT_MS = 45_000;
+/** 백엔드 미연결·불안정 시 짧은 주기로 /api/health 재시도 */
 let healthPollHandle: number | null = null;
+/** 정상일 때도 주기 핑으로 프록시·탭 유휴 끊김 완화 */
+let healthKeepAliveHandle: number | null = null;
 
 function clearHealthPoll(): void {
   if (healthPollHandle != null) {
@@ -30,11 +39,29 @@ function clearHealthPoll(): void {
   }
 }
 
-function ensureHealthPollWhenDisconnected(): void {
-  if (healthPollHandle != null) return;
+function ensureHealthPollIfNeeded(): void {
+  const need = !state.health || connectionUnstable;
+  if (!need) {
+    clearHealthPoll();
+    return;
+  }
+  clearHealthPoll();
+  const everyMs = connectionUnstable ? 2500 : 5000;
   healthPollHandle = window.setInterval(() => {
     void refreshHealth(true).then(() => renderSync());
-  }, 6000);
+  }, everyMs);
+}
+
+function startHealthKeepAlive(): void {
+  if (healthKeepAliveHandle != null) return;
+  healthKeepAliveHandle = window.setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    void refreshHealth(true).then(() => renderSync());
+  }, 30_000);
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** GET 기본 12s / POST·LLM 180s — 무한 대기 방지 */
@@ -877,28 +904,43 @@ function buildTeamEvidencePackage(res: TeamUnifiedReport): Record<string, unknow
 
 async function refreshHealth(force = false): Promise<void> {
   const now = Date.now();
-  if (!force && state.health && now - lastHealthFetchedAt < HEALTH_CACHE_MS) return;
-  if (!force && !state.health && now - lastHealthAttemptAt < HEALTH_RETRY_MS) return;
+  if (!force && state.health && !connectionUnstable && now - lastHealthFetchedAt < HEALTH_CACHE_MS) return;
+  if (!force && !state.health && !connectionUnstable && now - lastHealthAttemptAt < HEALTH_RETRY_MS) return;
   lastHealthAttemptAt = now;
-  const t0 = performance.now();
-  try {
-    const r = await apiFetch("/api/health", { timeoutMs: 25_000 });
-    lastHealthLatencyMs = Math.max(0, Math.round(performance.now() - t0));
-    lastHealthCheckedAt = Date.now();
-    if (!r.ok) {
-      state.health = null;
-      ensureHealthPollWhenDisconnected();
-      return;
+
+  for (let attempt = 0; attempt < HEALTH_FETCH_ATTEMPTS; attempt++) {
+    const t0 = performance.now();
+    try {
+      const r = await apiFetch("/api/health", { timeoutMs: HEALTH_ATTEMPT_TIMEOUT_MS });
+      lastHealthLatencyMs = Math.max(0, Math.round(performance.now() - t0));
+      lastHealthCheckedAt = Date.now();
+      if (r.ok) {
+        state.health = (await r.json()) as BackendHealth;
+        lastHealthFetchedAt = Date.now();
+        lastSuccessfulHealthAt = Date.now();
+        connectionUnstable = false;
+        clearHealthPoll();
+        return;
+      }
+    } catch {
+      lastHealthLatencyMs = null;
+      lastHealthCheckedAt = Date.now();
     }
-    state.health = (await r.json()) as BackendHealth;
-    lastHealthFetchedAt = Date.now();
-    clearHealthPoll();
-  } catch {
-    state.health = null;
-    lastHealthLatencyMs = null;
-    lastHealthCheckedAt = Date.now();
-    ensureHealthPollWhenDisconnected();
+    if (attempt < HEALTH_FETCH_ATTEMPTS - 1) {
+      await sleepMs(600 * Math.pow(1.55, attempt));
+    }
   }
+
+  const tFail = Date.now();
+  const sticky = state.health != null && tFail - lastSuccessfulHealthAt < HEALTH_STICKY_MS;
+  if (sticky) {
+    connectionUnstable = true;
+    ensureHealthPollIfNeeded();
+    return;
+  }
+  state.health = null;
+  connectionUnstable = false;
+  ensureHealthPollIfNeeded();
 }
 
 async function submitAnalyze(): Promise<void> {
@@ -1654,21 +1696,32 @@ async function submitRubricAlign(): Promise<void> {
 
 function connectionStripHtml(): string {
   const connected = !!state.health;
+  const unstable = connected && connectionUnstable;
   const latency = lastHealthLatencyMs;
-  const isDegraded = connected && latency != null && latency >= 1200;
-  const status = connected ? (isDegraded ? "DEGRADED" : "LIVE") : "OFFLINE";
-  const stripClass = connected
-    ? isDegraded
-      ? "conn-strip conn-strip--degraded"
-      : "conn-strip conn-strip--live"
-    : "conn-strip conn-strip--offline";
-  const dotClass = connected ? (isDegraded ? "api-dot api-dot--degraded" : "api-dot api-dot--on") : "api-dot api-dot--off";
+  const isDegraded = connected && !unstable && latency != null && latency >= 1200;
+  const status = unstable ? "RECONNECT" : connected ? (isDegraded ? "DEGRADED" : "LIVE") : "OFFLINE";
+  const stripClass = unstable
+    ? "conn-strip conn-strip--partial"
+    : connected
+      ? isDegraded
+        ? "conn-strip conn-strip--degraded"
+        : "conn-strip conn-strip--live"
+      : "conn-strip conn-strip--offline";
+  const dotClass = unstable
+    ? "api-dot api-dot--degraded"
+    : connected
+      ? isDegraded
+        ? "api-dot api-dot--degraded"
+        : "api-dot api-dot--on"
+      : "api-dot api-dot--off";
   const mainMsg =
-    status === "LIVE"
-      ? "프론트 ↔ 백엔드 정상 연결"
-      : status === "DEGRADED"
-        ? "프론트 ↔ 백엔드 연결(지연)"
-        : "프론트 ↔ 백엔드 미연결";
+    status === "RECONNECT"
+      ? "재연결 중 — 마지막 정상 연결 정보 유지(자동 재시도)"
+      : status === "LIVE"
+        ? "프론트 ↔ 백엔드 정상 연결"
+        : status === "DEGRADED"
+          ? "프론트 ↔ 백엔드 연결(지연)"
+          : "프론트 ↔ 백엔드 미연결";
   const checked = lastHealthCheckedAt ? new Date(lastHealthCheckedAt).toLocaleTimeString() : "-";
   const latencyTxt = latency != null ? `${latency}ms` : "-";
   return `
@@ -2604,9 +2657,14 @@ function wire(): void {
       void refreshHealth(true).then(() => renderSync());
     }
   });
+
+  window.addEventListener("online", () => {
+    connectionUnstable = false;
+    void refreshHealth(true).then(() => renderSync());
+  });
 }
 
-/** URL 해시로 뷰 복원 (예: #/team, #/hub). 해시 없으면 홈. */
+/** URL 해시로 뷰 복원  해시 없으면 홈. */
 function applyHashRouteOnce(): void {
   const h = (location.hash || "").replace(/^#\/?/, "").split(/[/?]/)[0]?.toLowerCase() ?? "";
   if (!h) return;
@@ -2627,6 +2685,7 @@ function applyHashRouteOnce(): void {
 function boot(): void {
   applyHashRouteOnce();
   renderSync();
+  startHealthKeepAlive();
   void refreshHealth(true).then(() => renderSync());
 }
 
