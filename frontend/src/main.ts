@@ -882,7 +882,7 @@ async function refreshHealth(force = false): Promise<void> {
   lastHealthAttemptAt = now;
   const t0 = performance.now();
   try {
-    const r = await apiFetch("/api/health", { timeoutMs: 10_000 });
+    const r = await apiFetch("/api/health", { timeoutMs: 25_000 });
     lastHealthLatencyMs = Math.max(0, Math.round(performance.now() - t0));
     lastHealthCheckedAt = Date.now();
     if (!r.ok) {
